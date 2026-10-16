@@ -1,3 +1,9 @@
 name = "imp3d"
-pages_build_output_dir = "public"
+main = "src/worker.js"
 compatibility_date = "2026-01-01"
+# Garde les variables "Text" définies dans le tableau de bord Cloudflare à chaque déploiement
+keep_vars = true
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
