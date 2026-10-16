@@ -67,6 +67,7 @@
   <div class="bar">
     <h1>🖨️ Imp3D</h1>
     <span class="ver" id="ver"></span>
+    <button class="icon" id="images" title="Récupérer les images manquantes">🖼️</button>
     <button class="icon" id="refresh" title="Rafraîchir">↻</button>
   </div>
 </header>
@@ -96,7 +97,7 @@
 
 <script>
 // Version de l'app : +1 à chaque push (voir CLAUDE.md)
-const APP_VERSION = 2;
+const APP_VERSION = 3;
 
 const STATUSES = [
   ["idee", "💡", "Idée"],
@@ -120,7 +121,7 @@ function toast(msg) {
   t.textContent = msg;
   t.classList.add("show");
   clearTimeout(toast.t);
-  toast.t = setTimeout(() => t.classList.remove("show"), 2600);
+  toast.t = setTimeout(() => t.classList.remove("show"), Math.max(2600, msg.length * 70));
 }
 
 async function api(method, body, query = "") {
@@ -181,7 +182,7 @@ function card(i) {
   return `
   <article class="card" style="--c: var(--${i.status})" data-id="${esc(i.id)}">
     <div class="top">
-      ${i.image ? `<img class="thumb" src="${esc(i.image)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : ""}
+      ${i.image ? `<img class="thumb" src="${esc(i.image)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ""}
       <div class="info">
         <div class="title">${title}</div>
         <div class="meta">${esc(i.source || "Idée texte")} · ${date}</div>
@@ -196,6 +197,26 @@ function card(i) {
       ${STATUSES.map(([k, e, l]) => `<button class="st ${i.status === k ? "on" : ""}" style="--c: var(--${k})" data-st="${k}"><span>${e}</span>${l}</button>`).join("")}
     </div>
   </article>`;
+}
+
+async function refreshImages() {
+  const btn = $("images");
+  btn.disabled = true;
+  toast("Recherche des images…");
+  try {
+    const data = await api("POST", { action: "refresh" });
+    items = data.items;
+    render();
+    let msg = `${data.found} image(s) trouvée(s)`;
+    if (data.failed.length) msg += ` · ${data.failed.length} échec(s) — ${data.failed[0].reason}`;
+    if (data.remaining) msg += ` · encore ${data.remaining}, reclique`;
+    toast(msg);
+    if (data.failed.length) console.table(data.failed);
+  } catch (e) {
+    toast("Erreur : " + e.message);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 async function add() {
@@ -265,6 +286,7 @@ $("addBtn").onclick = add;
 $("input").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) add(); });
 $("search").oninput = render;
 $("refresh").onclick = load;
+$("images").onclick = refreshImages;
 $("pwBtn").onclick = () => { pw = $("pw").value; localStorage.setItem("imp3d_pw", pw); load(); };
 $("pw").addEventListener("keydown", (e) => { if (e.key === "Enter") $("pwBtn").click(); });
 

@@ -37,7 +37,8 @@ export async function onRequest({ request, env }) {
         return json({ items });
       }
       case "POST": {
-        const { text = "", status = "idee" } = await request.json();
+        const { text = "", status = "idee", action, id } = await request.json();
+        if (action === "refresh") return json(await refreshImages(env, id));
         return json(await addFromText(env, text, STATUSES.includes(status) ? status : "idee"));
       }
       case "PATCH": {
@@ -63,7 +64,8 @@ async function addFromText(env, text, status) {
   if (!entries.length) return { added: [], duplicates: [], items: (await loadDb(env)).items };
 
   // Métadonnées (titre / image) récupérées hors verrou, en parallèle.
-  await Promise.all(entries.filter((e) => e.url).slice(0, 25).map(enrich));
+  // Limité pour rester sous le plafond de sous-requêtes d'un Worker (50 en gratuit).
+  await Promise.all(entries.filter((e) => e.url).slice(0, MAX_FETCH).map((e) => enrich(e, true)));
 
   let added = [];
   let duplicates = [];
@@ -85,6 +87,39 @@ async function addFromText(env, text, status) {
     return added.length ? `Ajout de ${added.length} élément(s)` : null;
   });
   return { added, duplicates, items };
+}
+
+// Récupère image (et titre s'il n'a pas été modifié à la main) des éléments sans image,
+// ou d'un seul élément si id est fourni. Renvoie le détail des échecs pour diagnostic.
+async function refreshImages(env, id) {
+  const { items: current } = await loadDb(env);
+  const todo = current.filter((i) => i.url && (id ? i.id === id : !i.image));
+  const batch = todo.slice(0, MAX_FETCH);
+  const results = await Promise.all(
+    batch.map(async (i) => {
+      const entry = { url: i.url, title: i.title };
+      const r = await enrich(entry, i.title === titleFromUrl(i.url));
+      return { id: i.id, entry, ...r, label: i.title || i.url };
+    })
+  );
+  const found = results.filter((r) => r.entry.image);
+  const items = await mutate(env, (items) => {
+    let n = 0;
+    for (const r of found) {
+      const item = items.find((i) => i.id === r.id);
+      if (!item) continue;
+      item.image = r.entry.image;
+      item.title = r.entry.title || item.title;
+      n++;
+    }
+    return n ? `Images récupérées pour ${n} élément(s)` : null;
+  });
+  return {
+    found: found.length,
+    failed: results.filter((r) => !r.entry.image).map((r) => ({ title: r.label, reason: r.reason })),
+    remaining: todo.length - batch.length,
+    items,
+  };
 }
 
 async function updateItem(env, { id, status, title, note }) {
@@ -186,28 +221,82 @@ export function titleFromUrl(url) {
   }
 }
 
-// Tente de lire og:title / og:image ; garde le titre tiré de l'URL en cas d'échec.
-async function enrich(entry) {
-  try {
-    const res = await fetch(entry.url, {
-      headers: { "user-agent": "Mozilla/5.0 (compatible; Imp3D/1.0)", accept: "text/html" },
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!res.ok) return;
-    const html = (await res.text()).slice(0, 300000);
-    const meta = (prop) => {
-      const re = new RegExp(`<meta[^>]+(?:property|name)=["']${prop}["'][^>]*>`, "i");
-      const tag = html.match(re)?.[0];
-      return tag?.match(/content=["']([^"']*)["']/i)?.[1];
-    };
-    const title = meta("og:title");
-    if (title) entry.title = decodeEntities(title).split(/\s+\|\s+/)[0].replace(/\s+by\s+[^|]+$/i, "").trim() || entry.title;
-    const image = meta("og:image");
-    if (image) entry.image = decodeEntities(image);
-  } catch {
-    // site injoignable / bloqué : on garde le titre issu de l'URL
+const MAX_FETCH = 15;
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36";
+
+// Essaie chaque stratégie (API du site, puis balises og: de la page) jusqu'à trouver une image.
+// Met à jour entry.image, et entry.title si useTitle. Renvoie { reason } en cas d'échec.
+async function enrich(entry, useTitle) {
+  const errors = [];
+  for (const strategy of strategiesFor(entry.url)) {
+    try {
+      const meta = await strategy(entry.url);
+      if (useTitle && meta.title) entry.title = meta.title;
+      if (meta.image) {
+        entry.image = meta.image;
+        return {};
+      }
+      errors.push(`${strategy.label} : pas d'image`);
+    } catch (e) {
+      errors.push(`${strategy.label} : ${e.name === "TimeoutError" ? "délai dépassé" : e.message}`);
+    }
   }
+  return { reason: errors.join(" · ") };
 }
+
+function strategiesFor(url) {
+  return /printables\.com\/model\/\d+/.test(url) ? [printablesApi, ogTags] : [ogTags];
+}
+
+async function printablesApi(url) {
+  const id = url.match(/\/model\/(\d+)/)[1];
+  const res = await fetch("https://api.printables.com/graphql/", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      accept: "application/json",
+      "user-agent": UA,
+      origin: "https://www.printables.com",
+      referer: "https://www.printables.com/",
+    },
+    body: JSON.stringify({
+      query: "query Print($id: ID!) { print(id: $id) { name image { filePath } } }",
+      variables: { id },
+    }),
+    signal: AbortSignal.timeout(6000),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const body = await res.json();
+  const print = body.data?.print;
+  if (!print) throw new Error(body.errors?.[0]?.message || "réponse vide");
+  return {
+    title: print.name,
+    image: print.image?.filePath ? `https://media.printables.com/${print.image.filePath}` : undefined,
+  };
+}
+printablesApi.label = "API Printables";
+
+async function ogTags(url) {
+  const res = await fetch(url, {
+    headers: { "user-agent": UA, accept: "text/html,application/xhtml+xml", "accept-language": "fr,en;q=0.8" },
+    signal: AbortSignal.timeout(6000),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const html = (await res.text()).slice(0, 400000);
+  const meta = (prop) => {
+    const re = new RegExp(`<meta[^>]+(?:property|name)=["']${prop}["'][^>]*>`, "i");
+    const tag = html.match(re)?.[0];
+    return tag?.match(/content=["']([^"']*)["']/i)?.[1];
+  };
+  const title = meta("og:title") || meta("twitter:title");
+  let image = meta("og:image") || meta("og:image:url") || meta("twitter:image");
+  if (image) image = new URL(decodeEntities(image), url).href;
+  return {
+    title: title && (decodeEntities(title).split(/\s+\|\s+/)[0].replace(/\s+by\s+[^|]+$/i, "").trim() || undefined),
+    image,
+  };
+}
+ogTags.label = "page";
 
 function decodeEntities(s) {
   return s
