@@ -77,16 +77,16 @@ async function makerworldApi(id) {
   const body = JSON.parse(text);
   const image = body.coverUrl || body.cover || body.designExtension?.design_pictures?.[0]?.url;
   if (!image) throw new Error("pas d'image, clés : " + Object.keys(body).slice(0, 25).join(","));
-  return { title: body.title, image };
+  return { title: body.title, image, via: "API MakerWorld" };
 }
 
 // Service tiers qui lit la page avec un vrai navigateur (gratuit, ~50/jour).
 async function microlink(url) {
-  const res = await fetch(`https://api.microlink.io/?url=${encodeURIComponent(url)}`, { signal: AbortSignal.timeout(30000) });
+  const res = await fetch(`https://api.microlink.io/?url=${encodeURIComponent(url)}`, { signal: AbortSignal.timeout(90000) });
   const body = await res.json().catch(() => ({}));
   if (body.status !== "success") throw new Error(`HTTP ${res.status} ${body.code || ""} ${body.message || ""}`.trim());
   if (!body.data?.image?.url) throw new Error("pas d'image");
-  return { title: cleanTitle(body.data.title), image: body.data.image.url };
+  return { title: cleanTitle(body.data.title), image: body.data.image.url, via: "Microlink" };
 }
 
 async function pageMeta(url) {
@@ -99,7 +99,7 @@ async function pageMeta(url) {
   for (const [name, ua] of BOTS) {
     try {
       const m = await ogTags(url, ua);
-      if (m.image) return m;
+      if (m.image) return { ...m, via: name };
       errors.push(`${name} : pas d'image`);
     } catch (e) {
       errors.push(`${name} : ${errMsg(e)}`);
@@ -127,8 +127,9 @@ if (pr.length) {
 }
 for (const i of todo.filter((i) => !found.has(i.id))) {
   try {
-    found.set(i.id, await pageMeta(i.url));
-    console.log(`OK page : ${i.url}`);
+    const m = await pageMeta(i.url);
+    found.set(i.id, m);
+    console.log(`OK (${m.via}) : ${i.url}`);
   } catch (e) {
     console.log(`ÉCHEC ${i.url} — ${e.message}`);
   }
