@@ -1,0 +1,4 @@
+APP_PASSWORD=change-moi
+GITHUB_TOKEN=github_pat_xxx
+GITHUB_REPO=RNestaM/Imp3D
+GITHUB_BRANCH=main

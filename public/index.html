@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1f6feb">
+<title>Imp3D</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #fff; --text: #1b1f24; --muted: #667085; --line: #e3e6ea;
+    --accent: #1f6feb; --accent-text: #fff;
+    --idee: #8250df; --a_faire: #d4a72c; --attente: #0969da; --fait: #1a7f37; --a_garder: #cf222e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0d1117; --card: #161b22; --text: #e6edf3; --muted: #8b949e; --line: #30363d; --accent: #388bfd; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { position: sticky; top: 0; z-index: 5; background: var(--bg); padding: calc(10px + env(safe-area-inset-top)) 16px 8px; border-bottom: 1px solid var(--line); }
+  .bar { display: flex; align-items: center; gap: 8px; }
+  h1 { font-size: 20px; margin: 0; flex: 1; }
+  .ver { font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; }
+  main { max-width: 760px; margin: 0 auto; padding: 12px 16px 80px; }
+  button, select, input, textarea { font: inherit; color: inherit; }
+  button { cursor: pointer; border: 1px solid var(--line); background: var(--card); border-radius: 10px; padding: 8px 12px; }
+  button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); font-weight: 600; }
+  button.icon { padding: 6px 10px; }
+  textarea, input[type=search], input[type=password], select {
+    width: 100%; border: 1px solid var(--line); background: var(--card); border-radius: 10px; padding: 10px 12px;
+  }
+  textarea { min-height: 84px; resize: vertical; }
+  .add { display: grid; gap: 8px; }
+  .add-row { display: flex; gap: 8px; }
+  .add-row select { flex: 1; }
+  .add-row button { flex: 1; }
+  .tabs { display: flex; gap: 6px; overflow-x: auto; padding: 12px 0 8px; scrollbar-width: none; }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tab { white-space: nowrap; border-radius: 999px; padding: 6px 12px; font-size: 14px; }
+  .tab.on { background: var(--text); color: var(--bg); border-color: var(--text); }
+  .tab .n { opacity: .7; margin-left: 4px; }
+  .list { display: grid; gap: 10px; margin-top: 8px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-left: 4px solid var(--c, var(--line)); border-radius: 12px; padding: 10px; display: grid; gap: 8px; }
+  .top { display: flex; gap: 10px; align-items: flex-start; }
+  .thumb { width: 64px; height: 64px; border-radius: 8px; object-fit: cover; flex: none; background: var(--line); }
+  .info { flex: 1; min-width: 0; }
+  .title { font-weight: 600; word-wrap: break-word; }
+  .title a { color: inherit; text-decoration: none; }
+  .title a:hover { text-decoration: underline; }
+  .meta { color: var(--muted); font-size: 13px; }
+  .note { font-size: 14px; color: var(--muted); white-space: pre-wrap; }
+  .actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  .st { flex: 1 1 0; min-width: 0; font-size: 11px; padding: 6px 2px; border-radius: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; flex-direction: column; align-items: center; gap: 2px; }
+  .st span { font-size: 16px; line-height: 1; }
+  .st.on { background: var(--c); border-color: var(--c); color: #fff; font-weight: 600; }
+  .tools { display: flex; gap: 6px; }
+  .empty { text-align: center; color: var(--muted); padding: 32px 0; }
+  .toast { position: fixed; left: 50%; bottom: calc(16px + env(safe-area-inset-bottom)); transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 10px; font-size: 14px; max-width: calc(100% - 32px); opacity: 0; transition: opacity .2s; pointer-events: none; }
+  .toast.show { opacity: 1; }
+  .login { max-width: 360px; margin: 15vh auto 0; display: grid; gap: 10px; padding: 0 16px; }
+  .hidden { display: none !important; }
+  footer { text-align: center; color: var(--muted); font-size: 12px; padding: 16px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="bar">
+    <h1>🖨️ Imp3D</h1>
+    <span class="ver" id="ver"></span>
+    <button class="icon" id="refresh" title="Rafraîchir">↻</button>
+  </div>
+</header>
+
+<section class="login hidden" id="login">
+  <h2>Connexion</h2>
+  <input type="password" id="pw" placeholder="Mot de passe" autocomplete="current-password">
+  <button class="primary" id="pwBtn">Entrer</button>
+</section>
+
+<main id="app" class="hidden">
+  <div class="add">
+    <textarea id="input" placeholder="Colle une ou plusieurs URL, ou écris une idée (une par ligne)…"></textarea>
+    <div class="add-row">
+      <select id="addStatus"></select>
+      <button class="primary" id="addBtn">Ajouter</button>
+    </div>
+  </div>
+
+  <nav class="tabs" id="tabs"></nav>
+  <input type="search" id="search" placeholder="Rechercher…">
+  <div class="list" id="list"></div>
+</main>
+
+<footer id="foot"></footer>
+<div class="toast" id="toast"></div>
+
+<script>
+// Version de l'app : +1 à chaque push (voir CLAUDE.md)
+const APP_VERSION = 1;
+
+const STATUSES = [
+  ["idee", "💡", "Idée"],
+  ["a_faire", "🛠️", "À faire"],
+  ["attente", "⏳", "Attente"],
+  ["fait", "✅", "Fait"],
+  ["a_garder", "⭐", "À garder"],
+];
+const $ = (id) => document.getElementById(id);
+
+let items = [];
+let filter = localStorage.getItem("imp3d_filter") || "all";
+let pw = localStorage.getItem("imp3d_pw") || "";
+
+$("ver").textContent = "v" + APP_VERSION;
+$("foot").textContent = "Imp3D · version " + APP_VERSION;
+$("addStatus").innerHTML = STATUSES.map(([k, e, l]) => `<option value="${k}">${e} ${l}</option>`).join("");
+
+function toast(msg) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(toast.t);
+  toast.t = setTimeout(() => t.classList.remove("show"), 2600);
+}
+
+async function api(method, body, query = "") {
+  const res = await fetch("/api/items" + query, {
+    method,
+    headers: { "content-type": "application/json", "x-app-password": pw },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({ error: "Réponse invalide (" + res.status + ")" }));
+  if (res.status === 401) { showLogin(); throw new Error("Mot de passe incorrect"); }
+  if (!res.ok) throw new Error(data.error || res.status);
+  return data;
+}
+
+function showLogin() {
+  $("app").classList.add("hidden");
+  $("login").classList.remove("hidden");
+  $("pw").focus();
+}
+
+async function load() {
+  try {
+    const data = await api("GET");
+    items = data.items;
+    $("login").classList.add("hidden");
+    $("app").classList.remove("hidden");
+    render();
+  } catch (e) {
+    if (e.message !== "Mot de passe incorrect") toast("Erreur : " + e.message);
+  }
+}
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function render() {
+  const counts = Object.fromEntries(STATUSES.map(([k]) => [k, 0]));
+  items.forEach((i) => counts[i.status]++);
+  $("tabs").innerHTML =
+    `<button class="tab ${filter === "all" ? "on" : ""}" data-f="all">Tout<span class="n">${items.length}</span></button>` +
+    STATUSES.map(([k, e, l]) => `<button class="tab ${filter === k ? "on" : ""}" data-f="${k}">${e} ${l}<span class="n">${counts[k]}</span></button>`).join("");
+
+  const q = $("search").value.trim().toLowerCase();
+  const shown = items
+    .filter((i) => filter === "all" || i.status === filter)
+    .filter((i) => !q || [i.title, i.url, i.note, i.source].some((v) => (v || "").toLowerCase().includes(q)))
+    .sort((a, b) => (b.updated || "").localeCompare(a.updated || ""));
+
+  $("list").innerHTML = shown.length ? shown.map(card).join("") : `<div class="empty">Rien ici pour l'instant.</div>`;
+}
+
+function card(i) {
+  const date = i.created ? new Date(i.created).toLocaleDateString("fr-FR") : "";
+  const title = i.url
+    ? `<a href="${esc(i.url)}" target="_blank" rel="noopener">${esc(i.title || i.url)}</a>`
+    : esc(i.title);
+  return `
+  <article class="card" style="--c: var(--${i.status})" data-id="${esc(i.id)}">
+    <div class="top">
+      ${i.image ? `<img class="thumb" src="${esc(i.image)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : ""}
+      <div class="info">
+        <div class="title">${title}</div>
+        <div class="meta">${esc(i.source || "Idée texte")} · ${date}</div>
+        ${i.note ? `<div class="note">${esc(i.note)}</div>` : ""}
+      </div>
+      <div class="tools">
+        <button class="icon" data-act="edit" title="Modifier">✏️</button>
+        <button class="icon" data-act="del" title="Supprimer">🗑️</button>
+      </div>
+    </div>
+    <div class="actions">
+      ${STATUSES.map(([k, e, l]) => `<button class="st ${i.status === k ? "on" : ""}" style="--c: var(--${k})" data-st="${k}"><span>${e}</span>${l}</button>`).join("")}
+    </div>
+  </article>`;
+}
+
+async function add() {
+  const text = $("input").value.trim();
+  if (!text) return;
+  $("addBtn").disabled = true;
+  try {
+    const data = await api("POST", { text, status: $("addStatus").value });
+    items = data.items;
+    $("input").value = "";
+    let msg = `${data.added.length} ajouté(s)`;
+    if (data.duplicates.length) msg += `, ${data.duplicates.length} déjà présent(s)`;
+    toast(msg);
+    render();
+  } catch (e) {
+    toast("Erreur : " + e.message);
+  } finally {
+    $("addBtn").disabled = false;
+  }
+}
+
+// Changement de statut optimiste : l'interface bouge tout de suite, on annule si l'API échoue.
+async function setStatus(id, status) {
+  const item = items.find((i) => i.id === id);
+  if (!item || item.status === status) return;
+  const prev = { status: item.status, updated: item.updated };
+  item.status = status;
+  item.updated = new Date().toISOString();
+  render();
+  try {
+    items = (await api("PATCH", { id, status })).items;
+    render();
+  } catch (e) {
+    Object.assign(item, prev);
+    render();
+    toast("Erreur : " + e.message);
+  }
+}
+
+async function edit(id) {
+  const item = items.find((i) => i.id === id);
+  const title = prompt("Titre", item.title || "");
+  if (title === null) return;
+  const note = prompt("Note", item.note || "");
+  if (note === null) return;
+  try {
+    items = (await api("PATCH", { id, title, note })).items;
+    render();
+  } catch (e) {
+    toast("Erreur : " + e.message);
+  }
+}
+
+async function del(id) {
+  const item = items.find((i) => i.id === id);
+  if (!confirm(`Supprimer « ${item.title || item.url} » ?`)) return;
+  try {
+    items = (await api("DELETE", null, "?id=" + encodeURIComponent(id))).items;
+    render();
+    toast("Supprimé");
+  } catch (e) {
+    toast("Erreur : " + e.message);
+  }
+}
+
+$("addBtn").onclick = add;
+$("input").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) add(); });
+$("search").oninput = render;
+$("refresh").onclick = load;
+$("pwBtn").onclick = () => { pw = $("pw").value; localStorage.setItem("imp3d_pw", pw); load(); };
+$("pw").addEventListener("keydown", (e) => { if (e.key === "Enter") $("pwBtn").click(); });
+
+$("tabs").onclick = (e) => {
+  const b = e.target.closest("[data-f]");
+  if (!b) return;
+  filter = b.dataset.f;
+  localStorage.setItem("imp3d_filter", filter);
+  render();
+};
+
+$("list").onclick = (e) => {
+  const cardEl = e.target.closest(".card");
+  if (!cardEl) return;
+  const id = cardEl.dataset.id;
+  const st = e.target.closest("[data-st]");
+  if (st) return setStatus(id, st.dataset.st);
+  const act = e.target.closest("[data-act]")?.dataset.act;
+  if (act === "edit") edit(id);
+  if (act === "del") del(id);
+};
+
+if (pw) load(); else showLogin();
+</script>
+</body>
+</html>
