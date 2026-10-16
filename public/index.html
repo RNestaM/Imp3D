@@ -97,7 +97,7 @@
 
 <script>
 // Version de l'app : +1 à chaque push (voir CLAUDE.md)
-const APP_VERSION = 5;
+const APP_VERSION = 6;
 
 const STATUSES = [
   ["idee", "💡", "Idée"],
@@ -199,33 +199,13 @@ function card(i) {
   </article>`;
 }
 
-// Les images sont cherchées par le navigateur (ta connexion) : Printables et Microlink
-// refusent les requêtes venant des serveurs Cloudflare (HTTP 429).
-const printablesId = (url) => url.match(/printables\.com\/(?:[a-z]{2}\/)?model\/(\d+)/)?.[1];
+// Images : le serveur lit la page en se présentant comme un robot d'aperçu (Discord, Facebook…),
+// puis le navigateur essaie Microlink pour ce qui manque encore.
 const cleanTitle = (t) => t && t.split(/\s+\|\s+/)[0].replace(/\s+by\s+[^|]+$/i, "").trim();
-const fetchErr = (e) => (e.name === "TimeoutError" ? "délai dépassé" : e.message === "Failed to fetch" || e instanceof TypeError ? "bloqué par le site" : e.message);
-
-// Une seule requête groupée à l'API Printables (souvent bloquée hors printables.com : on tente).
-async function printablesMetas(list) {
-  const query = `query { ${list.map((i, n) => `p${n}: print(id: ${JSON.stringify(printablesId(i.url))}) { name image { filePath } }`).join(" ")} }`;
-  const res = await fetch("https://api.printables.com/graphql/", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ query }),
-    signal: AbortSignal.timeout(6000),
-  });
-  if (!res.ok) throw new Error("HTTP " + res.status);
-  const data = (await res.json()).data || {};
-  const out = {};
-  list.forEach((i, n) => {
-    const p = data["p" + n];
-    if (p?.image?.filePath) out[i.id] = { title: p.name, image: "https://media.printables.com/" + p.image.filePath };
-  });
-  return out;
-}
+const fetchErr = (e) => (e.name === "TimeoutError" ? "délai dépassé" : e instanceof TypeError ? "bloqué" : e.message);
 
 async function microlink(url) {
-  const res = await fetch("https://api.microlink.io/?url=" + encodeURIComponent(url), { signal: AbortSignal.timeout(12000) });
+  const res = await fetch("https://api.microlink.io/?url=" + encodeURIComponent(url), { signal: AbortSignal.timeout(20000) });
   const body = await res.json().catch(() => ({}));
   if (!res.ok || body.status !== "success") throw new Error(res.ok ? body.message || body.status : "HTTP " + res.status);
   return { title: cleanTitle(body.data?.title), image: body.data?.image?.url };
@@ -234,21 +214,29 @@ async function microlink(url) {
 async function findImages(list, progress) {
   const found = {};
   const reasons = {};
-  const pr = list.filter((i) => printablesId(i.url));
-  if (pr.length) {
-    try { Object.assign(found, await printablesMetas(pr)); }
-    catch (e) { pr.forEach((i) => (reasons[i.id] = ["API Printables : " + fetchErr(e)])); }
-  }
   let done = 0;
-  for (const i of list) {
-    progress?.(++done, list.length);
-    if (found[i.id]) continue;
+  for (let n = 0; n < list.length; n += 8) {
+    const chunk = list.slice(n, n + 8);
+    try {
+      const { results } = await api("POST", { action: "meta", urls: chunk.map((i) => i.url) });
+      chunk.forEach((i, k) => {
+        const r = results[k];
+        if (r?.image) found[i.id] = r;
+        else reasons[i.id] = [r?.reason || "page : pas de réponse"];
+      });
+    } catch (e) {
+      chunk.forEach((i) => (reasons[i.id] = ["serveur : " + e.message]));
+    }
+    done += chunk.length;
+    progress?.(done, list.length);
+  }
+  for (const i of list.filter((i) => !found[i.id])) {
     try {
       const meta = await microlink(i.url);
       if (meta.image) found[i.id] = meta;
-      else (reasons[i.id] ||= []).push("Microlink : pas d'image");
+      else reasons[i.id].push("Microlink : pas d'image");
     } catch (e) {
-      (reasons[i.id] ||= []).push("Microlink : " + fetchErr(e));
+      reasons[i.id].push("Microlink : " + fetchErr(e));
     }
   }
   const updates = Object.entries(found).map(([id, m]) => ({ id, image: m.image, title: m.title }));

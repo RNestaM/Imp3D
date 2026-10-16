@@ -37,8 +37,9 @@ export async function onRequest({ request, env }) {
         return json({ items });
       }
       case "POST": {
-        const { text = "", status = "idee", action, updates } = await request.json();
+        const { text = "", status = "idee", action, updates, urls } = await request.json();
         if (action === "setImages") return json(await setImages(env, updates));
+        if (action === "meta") return json(await metaFor(urls));
         return json(await addFromText(env, text, STATUSES.includes(status) ? status : "idee"));
       }
       case "PATCH": {
@@ -207,26 +208,51 @@ export function titleFromUrl(url) {
   }
 }
 
-const MAX_FETCH = 15;
-const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36";
+const MAX_FETCH = 8;
 
-const printablesId = (url) => url.match(/printables\.com\/(?:[a-z]{2}\/)?model\/(\d+)/)?.[1];
+// Printables (et d'autres) bloquent les navigateurs automatisés mais laissent passer les robots
+// d'aperçu des réseaux sociaux (c'est ainsi que Discord affiche l'image). On se présente comme eux.
+const PREVIEW_BOTS = [
+  ["Discordbot", "Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)"],
+  ["Facebook", "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)"],
+  ["Twitterbot", "Twitterbot/1.0"],
+  ["Telegram", "TelegramBot (like TwitterBot)"],
+];
 
-// jobs : [{ entry, useTitle }]. Essai rapide côté serveur via les balises og: de la page,
-// sauf Printables (bloque les robots) : le navigateur complète ensuite (voir setImages).
+const errMsg = (e) => (e.name === "TimeoutError" ? "délai dépassé" : e.message);
+
+// Titre + image d'une page : essaie chaque robot jusqu'à obtenir une image.
+async function pageMeta(url) {
+  const errors = [];
+  let title;
+  for (const [name, ua] of PREVIEW_BOTS) {
+    try {
+      const meta = await ogTags(url, ua);
+      title ||= meta.title;
+      if (meta.image) return { title: title || meta.title, image: meta.image };
+      errors.push(`${name} : pas d'image`);
+    } catch (e) {
+      errors.push(`${name} : ${errMsg(e)}`);
+    }
+  }
+  return { title, reason: "page (" + errors.join(", ") + ")" };
+}
+
+// POST { action: "meta", urls } : utilisé par le navigateur pour les fiches sans image.
+async function metaFor(urls) {
+  const list = (Array.isArray(urls) ? urls : []).filter((u) => /^https?:\/\//.test(u)).slice(0, MAX_FETCH);
+  return { results: await Promise.all(list.map(async (url) => ({ url, ...(await pageMeta(url)) }))) };
+}
+
+// jobs : [{ entry, useTitle }]. Remplit entry.image / entry.title quand c'est possible ;
+// le navigateur complète ensuite (Microlink) ce qui manque.
 async function enrichAll(jobs) {
   await Promise.all(
-    jobs
-      .filter((j) => !printablesId(j.entry.url))
-      .map(async (j) => {
-        try {
-          const meta = await ogTags(j.entry.url);
-          if (j.useTitle && meta.title) j.entry.title = meta.title;
-          if (meta.image) j.entry.image = meta.image;
-        } catch {
-          // le navigateur réessaiera
-        }
-      })
+    jobs.map(async (j) => {
+      const meta = await pageMeta(j.entry.url);
+      if (j.useTitle && meta.title) j.entry.title = meta.title;
+      if (meta.image) j.entry.image = meta.image;
+    })
   );
 }
 
@@ -234,9 +260,9 @@ function cleanTitle(title) {
   return title && (decodeEntities(title).split(/\s+\|\s+/)[0].replace(/\s+by\s+[^|]+$/i, "").trim() || undefined);
 }
 
-async function ogTags(url) {
+async function ogTags(url, ua) {
   const res = await fetch(url, {
-    headers: { "user-agent": UA, accept: "text/html,application/xhtml+xml", "accept-language": "fr,en;q=0.8" },
+    headers: { "user-agent": ua, accept: "text/html,application/xhtml+xml", "accept-language": "fr,en;q=0.8" },
     signal: AbortSignal.timeout(4000),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
