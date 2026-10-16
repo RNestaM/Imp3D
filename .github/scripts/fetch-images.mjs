@@ -12,10 +12,15 @@ const BOTS = [
   ["Chrome", CHROME],
   ["Discordbot", "Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)"],
   ["Facebook", "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)"],
+  ["Twitterbot", "Twitterbot/1.0"],
+  ["Slackbot", "Slackbot-LinkExpanding 1.0 (+https://api.slack.com/robots)"],
+  ["Telegram", "TelegramBot (like TwitterBot)"],
+  ["WhatsApp", "WhatsApp/2.23.20.0"],
 ];
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const sh = (cmd) => execSync(cmd, { stdio: ["ignore", "pipe", "inherit"] }).toString().trim();
+const makerworldId = (url) => url.match(/makerworld\.com\/(?:[a-z]{2}\/)?models\/(\d+)/)?.[1];
 const printablesId = (url) => url.match(/printables\.com\/(?:[a-z]{2}\/)?model\/(\d+)/)?.[1];
 const errMsg = (e) => (e.name === "TimeoutError" ? "délai dépassé" : e.message);
 const cleanTitle = (t) =>
@@ -61,8 +66,36 @@ async function ogTags(url, ua) {
   return { title: cleanTitle(meta("og:title") || meta("twitter:title")), image };
 }
 
+// API interne de MakerWorld (celle qu'utilise leur site).
+async function makerworldApi(id) {
+  const res = await fetch(`https://makerworld.com/api/v1/design-service/design/${id}`, {
+    headers: { "user-agent": CHROME, accept: "application/json", referer: `https://makerworld.com/en/models/${id}` },
+    signal: AbortSignal.timeout(15000),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const body = JSON.parse(text);
+  const image = body.coverUrl || body.cover || body.designExtension?.design_pictures?.[0]?.url;
+  if (!image) throw new Error("pas d'image, clés : " + Object.keys(body).slice(0, 25).join(","));
+  return { title: body.title, image };
+}
+
+// Service tiers qui lit la page avec un vrai navigateur (gratuit, ~50/jour).
+async function microlink(url) {
+  const res = await fetch(`https://api.microlink.io/?url=${encodeURIComponent(url)}`, { signal: AbortSignal.timeout(30000) });
+  const body = await res.json().catch(() => ({}));
+  if (body.status !== "success") throw new Error(`HTTP ${res.status} ${body.code || ""} ${body.message || ""}`.trim());
+  if (!body.data?.image?.url) throw new Error("pas d'image");
+  return { title: cleanTitle(body.data.title), image: body.data.image.url };
+}
+
 async function pageMeta(url) {
+  url = url.split("#")[0];
   const errors = [];
+  const mwId = makerworldId(url);
+  if (mwId) {
+    try { return await makerworldApi(mwId); } catch (e) { errors.push(`API MakerWorld : ${errMsg(e)}`); }
+  }
   for (const [name, ua] of BOTS) {
     try {
       const m = await ogTags(url, ua);
@@ -73,7 +106,8 @@ async function pageMeta(url) {
     }
     await sleep(500);
   }
-  throw new Error("page (" + errors.join(", ") + ")");
+  try { return await microlink(url); } catch (e) { errors.push(`Microlink : ${errMsg(e)}`); }
+  throw new Error(errors.join(", "));
 }
 
 // ---- 1. Recherche ----
