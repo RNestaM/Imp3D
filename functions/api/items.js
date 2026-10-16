@@ -65,7 +65,7 @@ async function addFromText(env, text, status) {
 
   // Métadonnées (titre / image) récupérées hors verrou, en parallèle.
   // Limité pour rester sous le plafond de sous-requêtes d'un Worker (50 en gratuit).
-  await Promise.all(entries.filter((e) => e.url).slice(0, MAX_FETCH).map((e) => enrich(e, true)));
+  await enrichAll(entries.filter((e) => e.url).slice(0, MAX_FETCH).map((entry) => ({ entry, useTitle: true })));
 
   let added = [];
   let duplicates = [];
@@ -95,13 +95,13 @@ async function refreshImages(env, id) {
   const { items: current } = await loadDb(env);
   const todo = current.filter((i) => i.url && (id ? i.id === id : !i.image));
   const batch = todo.slice(0, MAX_FETCH);
-  const results = await Promise.all(
-    batch.map(async (i) => {
-      const entry = { url: i.url, title: i.title };
-      const r = await enrich(entry, i.title === titleFromUrl(i.url));
-      return { id: i.id, entry, ...r, label: i.title || i.url };
-    })
-  );
+  const results = batch.map((i) => ({
+    id: i.id,
+    label: i.title || i.url,
+    entry: { url: i.url, title: i.title },
+    useTitle: i.title === titleFromUrl(i.url),
+  }));
+  await enrichAll(results);
   const found = results.filter((r) => r.entry.image);
   const items = await mutate(env, (items) => {
     let n = 0;
@@ -224,57 +224,97 @@ export function titleFromUrl(url) {
 const MAX_FETCH = 15;
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36";
 
-// Essaie chaque stratégie (API du site, puis balises og: de la page) jusqu'à trouver une image.
-// Met à jour entry.image, et entry.title si useTitle. Renvoie { reason } en cas d'échec.
-async function enrich(entry, useTitle) {
-  const errors = [];
-  for (const strategy of strategiesFor(entry.url)) {
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const printablesId = (url) => url.match(/printables\.com\/(?:[a-z]{2}\/)?model\/(\d+)/)?.[1];
+
+// jobs : [{ entry, useTitle }]. Remplit entry.image (et entry.title si useTitle),
+// ou job.reason avec la cause de l'échec.
+//  1. Printables : UNE requête groupée à leur API (des requêtes en parallèle → HTTP 429).
+//  2. Autres sites : balises og: de la page.
+//  3. Ce qui reste : service Microlink (lit la page pour nous ; gratuit, ~50/jour).
+async function enrichAll(jobs) {
+  const errors = new Map(jobs.map((j) => [j, []]));
+  const apply = (job, meta, label) => {
+    if (job.useTitle && meta.title) job.entry.title = meta.title;
+    if (meta.image) job.entry.image = meta.image;
+    else errors.get(job).push(`${label} : pas d'image`);
+  };
+
+  const printables = jobs.filter((j) => printablesId(j.entry.url));
+  if (printables.length) {
     try {
-      const meta = await strategy(entry.url);
-      if (useTitle && meta.title) entry.title = meta.title;
-      if (meta.image) {
-        entry.image = meta.image;
-        return {};
-      }
-      errors.push(`${strategy.label} : pas d'image`);
+      const metas = await printablesApi(printables.map((j) => printablesId(j.entry.url)));
+      printables.forEach((j, n) => (metas[n] ? apply(j, metas[n], "API Printables") : errors.get(j).push("API Printables : introuvable")));
     } catch (e) {
-      errors.push(`${strategy.label} : ${e.name === "TimeoutError" ? "délai dépassé" : e.message}`);
+      printables.forEach((j) => errors.get(j).push(`API Printables : ${errMsg(e)}`));
     }
   }
-  return { reason: errors.join(" · ") };
+
+  await Promise.all(
+    jobs
+      .filter((j) => !j.entry.image && !printablesId(j.entry.url))
+      .map(async (j) => {
+        try { apply(j, await ogTags(j.entry.url), "page"); } catch (e) { errors.get(j).push(`page : ${errMsg(e)}`); }
+      })
+  );
+
+  for (const j of jobs.filter((j) => !j.entry.image)) {
+    try { apply(j, await microlink(j.entry.url), "Microlink"); } catch (e) { errors.get(j).push(`Microlink : ${errMsg(e)}`); }
+  }
+
+  for (const j of jobs) if (!j.entry.image) j.reason = errors.get(j).join(" · ");
 }
 
-function strategiesFor(url) {
-  return /printables\.com\/model\/\d+/.test(url) ? [printablesApi, ogTags] : [ogTags];
+const errMsg = (e) => (e.name === "TimeoutError" ? "délai dépassé" : e.message);
+
+// Une seule requête GraphQL pour tous les modèles (alias p0, p1, …).
+// En cas de 429, attend le délai demandé (max 5 s) et réessaie une fois.
+async function printablesApi(ids) {
+  const query = `query { ${ids.map((id, n) => `p${n}: print(id: ${JSON.stringify(id)}) { name image { filePath } }`).join(" ")} }`;
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch("https://api.printables.com/graphql/", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json",
+        "user-agent": UA,
+        origin: "https://www.printables.com",
+        referer: "https://www.printables.com/",
+      },
+      body: JSON.stringify({ query }),
+      signal: AbortSignal.timeout(8000),
+    });
+    if (res.status === 429 && attempt === 0) {
+      await sleep(Math.min(5, Number(res.headers.get("retry-after")) || 2) * 1000);
+      continue;
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const body = await res.json();
+    if (!body.data) throw new Error(body.errors?.[0]?.message || "réponse vide");
+    return ids.map((_, n) => {
+      const print = body.data[`p${n}`];
+      return print && {
+        title: print.name,
+        image: print.image?.filePath ? `https://media.printables.com/${print.image.filePath}` : undefined,
+      };
+    });
+  }
 }
 
-async function printablesApi(url) {
-  const id = url.match(/\/model\/(\d+)/)[1];
-  const res = await fetch("https://api.printables.com/graphql/", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      accept: "application/json",
-      "user-agent": UA,
-      origin: "https://www.printables.com",
-      referer: "https://www.printables.com/",
-    },
-    body: JSON.stringify({
-      query: "query Print($id: ID!) { print(id: $id) { name image { filePath } } }",
-      variables: { id },
-    }),
-    signal: AbortSignal.timeout(6000),
+async function microlink(url) {
+  const res = await fetch(`https://api.microlink.io/?url=${encodeURIComponent(url)}`, {
+    headers: { accept: "application/json" },
+    signal: AbortSignal.timeout(10000),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const body = await res.json();
-  const print = body.data?.print;
-  if (!print) throw new Error(body.errors?.[0]?.message || "réponse vide");
-  return {
-    title: print.name,
-    image: print.image?.filePath ? `https://media.printables.com/${print.image.filePath}` : undefined,
-  };
+  if (body.status !== "success") throw new Error(body.message || body.status);
+  return { title: cleanTitle(body.data?.title), image: body.data?.image?.url };
 }
-printablesApi.label = "API Printables";
+
+function cleanTitle(title) {
+  return title && (decodeEntities(title).split(/\s+\|\s+/)[0].replace(/\s+by\s+[^|]+$/i, "").trim() || undefined);
+}
 
 async function ogTags(url) {
   const res = await fetch(url, {
@@ -291,12 +331,8 @@ async function ogTags(url) {
   const title = meta("og:title") || meta("twitter:title");
   let image = meta("og:image") || meta("og:image:url") || meta("twitter:image");
   if (image) image = new URL(decodeEntities(image), url).href;
-  return {
-    title: title && (decodeEntities(title).split(/\s+\|\s+/)[0].replace(/\s+by\s+[^|]+$/i, "").trim() || undefined),
-    image,
-  };
+  return { title: cleanTitle(title), image };
 }
-ogTags.label = "page";
 
 function decodeEntities(s) {
   return s
