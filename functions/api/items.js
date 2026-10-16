@@ -37,9 +37,7 @@ export async function onRequest({ request, env }) {
         return json({ items });
       }
       case "POST": {
-        const { text = "", status = "idee", action, updates, urls } = await request.json();
-        if (action === "setImages") return json(await setImages(env, updates));
-        if (action === "meta") return json(await metaFor(urls));
+        const { text = "", status = "idee" } = await request.json();
         return json(await addFromText(env, text, STATUSES.includes(status) ? status : "idee"));
       }
       case "PATCH": {
@@ -64,9 +62,8 @@ async function addFromText(env, text, status) {
   const entries = parseInput(text);
   if (!entries.length) return { added: [], duplicates: [], items: (await loadDb(env)).items };
 
-  // Métadonnées (titre / image) récupérées hors verrou, en parallèle.
-  // Limité pour rester sous le plafond de sous-requêtes d'un Worker (50 en gratuit).
-  await enrichAll(entries.filter((e) => e.url).slice(0, MAX_FETCH).map((entry) => ({ entry, useTitle: true })));
+  // Les images sont ajoutées ensuite par GitHub Actions (.github/scripts/fetch-images.mjs) :
+  // Printables renvoie 429 à toutes les requêtes venant des serveurs Cloudflare.
 
   let added = [];
   let duplicates = [];
@@ -88,25 +85,6 @@ async function addFromText(env, text, status) {
     return added.length ? `Ajout de ${added.length} élément(s)` : null;
   });
   return { added, duplicates, items };
-}
-
-// Enregistre les images trouvées par le navigateur : [{ id, image, title? }].
-// (Printables et Microlink bloquent les IP partagées de Cloudflare, pas celles des visiteurs.)
-// Le titre n'est remplacé que s'il est encore celui déduit de l'URL.
-async function setImages(env, updates) {
-  const valid = (Array.isArray(updates) ? updates : []).filter((u) => /^https?:\/\//.test(u?.image || ""));
-  const items = await mutate(env, (items) => {
-    let n = 0;
-    for (const u of valid) {
-      const item = items.find((i) => i.id === u.id);
-      if (!item) continue;
-      item.image = u.image;
-      if (u.title && item.url && item.title === titleFromUrl(item.url)) item.title = String(u.title).trim();
-      n++;
-    }
-    return n ? `Images ajoutées pour ${n} élément(s)` : null;
-  });
-  return { items };
 }
 
 async function updateItem(env, { id, status, title, note }) {
@@ -208,77 +186,7 @@ export function titleFromUrl(url) {
   }
 }
 
-const MAX_FETCH = 8;
-
-// Printables (et d'autres) bloquent les navigateurs automatisés mais laissent passer les robots
-// d'aperçu des réseaux sociaux (c'est ainsi que Discord affiche l'image). On se présente comme eux.
-const PREVIEW_BOTS = [
-  ["Discordbot", "Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)"],
-  ["Facebook", "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)"],
-  ["Twitterbot", "Twitterbot/1.0"],
-  ["Telegram", "TelegramBot (like TwitterBot)"],
-];
-
-const errMsg = (e) => (e.name === "TimeoutError" ? "délai dépassé" : e.message);
-
-// Titre + image d'une page : essaie chaque robot jusqu'à obtenir une image.
-async function pageMeta(url) {
-  const errors = [];
-  let title;
-  for (const [name, ua] of PREVIEW_BOTS) {
-    try {
-      const meta = await ogTags(url, ua);
-      title ||= meta.title;
-      if (meta.image) return { title: title || meta.title, image: meta.image };
-      errors.push(`${name} : pas d'image`);
-    } catch (e) {
-      errors.push(`${name} : ${errMsg(e)}`);
-    }
-  }
-  return { title, reason: "page (" + errors.join(", ") + ")" };
-}
-
-// POST { action: "meta", urls } : utilisé par le navigateur pour les fiches sans image.
-async function metaFor(urls) {
-  const list = (Array.isArray(urls) ? urls : []).filter((u) => /^https?:\/\//.test(u)).slice(0, MAX_FETCH);
-  return { results: await Promise.all(list.map(async (url) => ({ url, ...(await pageMeta(url)) }))) };
-}
-
-// jobs : [{ entry, useTitle }]. Remplit entry.image / entry.title quand c'est possible ;
-// le navigateur complète ensuite (Microlink) ce qui manque.
-async function enrichAll(jobs) {
-  await Promise.all(
-    jobs.map(async (j) => {
-      const meta = await pageMeta(j.entry.url);
-      if (j.useTitle && meta.title) j.entry.title = meta.title;
-      if (meta.image) j.entry.image = meta.image;
-    })
-  );
-}
-
-function cleanTitle(title) {
-  return title && (decodeEntities(title).split(/\s+\|\s+/)[0].replace(/\s+by\s+[^|]+$/i, "").trim() || undefined);
-}
-
-async function ogTags(url, ua) {
-  const res = await fetch(url, {
-    headers: { "user-agent": ua, accept: "text/html,application/xhtml+xml", "accept-language": "fr,en;q=0.8" },
-    signal: AbortSignal.timeout(4000),
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const html = (await res.text()).slice(0, 400000);
-  const meta = (prop) => {
-    const re = new RegExp(`<meta[^>]+(?:property|name)=["']${prop}["'][^>]*>`, "i");
-    const tag = html.match(re)?.[0];
-    return tag?.match(/content=["']([^"']*)["']/i)?.[1];
-  };
-  const title = meta("og:title") || meta("twitter:title");
-  let image = meta("og:image") || meta("og:image:url") || meta("twitter:image");
-  if (image) image = new URL(decodeEntities(image), url).href;
-  return { title: cleanTitle(title), image };
-}
-
-function decodeEntities(s) {
+export function decodeEntities(s) {
   return s
     .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(+n))
     .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))

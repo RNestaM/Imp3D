@@ -29,6 +29,10 @@ Doit rester **phone friendly**.
   PATCH statut/titre/note, DELETE `?id=`). Protégée par l'en-tête `x-app-password`.
 - `data/ideas.xml` — la base : un `<item id status created updated>` avec `<title> <url> <source> <image> <note>`.
   Lue/écrite via l'API GitHub Contents (gestion des conflits par `sha`, avec réessai).
+- `.github/workflows/images.yml` + `.github/scripts/fetch-images.mjs` — à chaque modif de `data/ideas.xml`,
+  GitHub Actions ajoute image + vrai titre aux éléments qui n'en ont pas (API Printables, sinon balises og:).
+  Pas côté Worker : Printables renvoie 429 à toutes les requêtes venant de Cloudflare.
+- Le site committe sur `main` : toujours `git pull --rebase origin main` avant de pousser.
 - Config Cloudflare : voir `README.md`.
 
 ## Plus tard (pas maintenant)

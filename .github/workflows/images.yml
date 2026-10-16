@@ -1,0 +1,29 @@
+name: Images
+
+# Ajoute les images manquantes dans data/ideas.xml après chaque modification par le site.
+on:
+  push:
+    branches: [main]
+    paths:
+      - data/ideas.xml
+      - .github/workflows/images.yml
+      - .github/scripts/fetch-images.mjs
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: images
+  cancel-in-progress: false
+
+jobs:
+  images:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node .github/scripts/fetch-images.mjs

@@ -67,7 +67,6 @@
   <div class="bar">
     <h1>🖨️ Imp3D</h1>
     <span class="ver" id="ver"></span>
-    <button class="icon" id="images" title="Récupérer les images manquantes">🖼️</button>
     <button class="icon" id="refresh" title="Rafraîchir">↻</button>
   </div>
 </header>
@@ -97,7 +96,7 @@
 
 <script>
 // Version de l'app : +1 à chaque push (voir CLAUDE.md)
-const APP_VERSION = 6;
+const APP_VERSION = 7;
 
 const STATUSES = [
   ["idee", "💡", "Idée"],
@@ -199,71 +198,15 @@ function card(i) {
   </article>`;
 }
 
-// Images : le serveur lit la page en se présentant comme un robot d'aperçu (Discord, Facebook…),
-// puis le navigateur essaie Microlink pour ce qui manque encore.
-const cleanTitle = (t) => t && t.split(/\s+\|\s+/)[0].replace(/\s+by\s+[^|]+$/i, "").trim();
-const fetchErr = (e) => (e.name === "TimeoutError" ? "délai dépassé" : e instanceof TypeError ? "bloqué" : e.message);
-
-async function microlink(url) {
-  const res = await fetch("https://api.microlink.io/?url=" + encodeURIComponent(url), { signal: AbortSignal.timeout(20000) });
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok || body.status !== "success") throw new Error(res.ok ? body.message || body.status : "HTTP " + res.status);
-  return { title: cleanTitle(body.data?.title), image: body.data?.image?.url };
-}
-
-async function findImages(list, progress) {
-  const found = {};
-  const reasons = {};
-  let done = 0;
-  for (let n = 0; n < list.length; n += 8) {
-    const chunk = list.slice(n, n + 8);
-    try {
-      const { results } = await api("POST", { action: "meta", urls: chunk.map((i) => i.url) });
-      chunk.forEach((i, k) => {
-        const r = results[k];
-        if (r?.image) found[i.id] = r;
-        else reasons[i.id] = [r?.reason || "page : pas de réponse"];
-      });
-    } catch (e) {
-      chunk.forEach((i) => (reasons[i.id] = ["serveur : " + e.message]));
-    }
-    done += chunk.length;
-    progress?.(done, list.length);
-  }
-  for (const i of list.filter((i) => !found[i.id])) {
-    try {
-      const meta = await microlink(i.url);
-      if (meta.image) found[i.id] = meta;
-      else reasons[i.id].push("Microlink : pas d'image");
-    } catch (e) {
-      reasons[i.id].push("Microlink : " + fetchErr(e));
-    }
-  }
-  const updates = Object.entries(found).map(([id, m]) => ({ id, image: m.image, title: m.title }));
-  if (updates.length) {
-    items = (await api("POST", { action: "setImages", updates })).items;
-    render();
-  }
-  const failed = list.filter((i) => !found[i.id]).map((i) => ({ title: i.title, reason: (reasons[i.id] || []).join(" · ") }));
-  if (failed.length) console.table(failed);
-  return { found: updates.length, failed };
-}
-
-async function refreshImages() {
-  const todo = items.filter((i) => i.url && !i.image);
-  if (!todo.length) return toast("Toutes les fiches ont déjà une image");
-  const btn = $("images");
-  btn.disabled = true;
-  try {
-    const r = await findImages(todo, (n, total) => toast(`Recherche des images… ${n}/${total}`));
-    let msg = `${r.found} image(s) trouvée(s)`;
-    if (r.failed.length) msg += ` · ${r.failed.length} échec(s) — ${r.failed[0].reason}`;
-    toast(msg);
-  } catch (e) {
-    toast("Erreur : " + e.message);
-  } finally {
-    btn.disabled = false;
-  }
+// Les images sont ajoutées par GitHub Actions ~1 min après l'ajout : on recharge pour les afficher.
+function waitForImages() {
+  clearTimeout(waitForImages.t);
+  let tries = 0;
+  const check = async () => {
+    await load();
+    if (items.some((i) => i.url && !i.image) && ++tries < 4) waitForImages.t = setTimeout(check, 40000);
+  };
+  waitForImages.t = setTimeout(check, 50000);
 }
 
 async function add() {
@@ -278,8 +221,7 @@ async function add() {
     if (data.duplicates.length) msg += `, ${data.duplicates.length} déjà présent(s)`;
     toast(msg);
     render();
-    const noImage = data.added.filter((i) => i.url && !i.image);
-    if (noImage.length) findImages(noImage).catch(() => {});
+    if (data.added.some((i) => i.url)) waitForImages();
   } catch (e) {
     toast("Erreur : " + e.message);
   } finally {
@@ -335,7 +277,6 @@ $("addBtn").onclick = add;
 $("input").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) add(); });
 $("search").oninput = render;
 $("refresh").onclick = load;
-$("images").onclick = refreshImages;
 $("pwBtn").onclick = () => { pw = $("pw").value; localStorage.setItem("imp3d_pw", pw); load(); };
 $("pw").addEventListener("keydown", (e) => { if (e.key === "Enter") $("pwBtn").click(); });
 
