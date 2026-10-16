@@ -97,7 +97,7 @@
 
 <script>
 // Version de l'app : +1 à chaque push (voir CLAUDE.md)
-const APP_VERSION = 4;
+const APP_VERSION = 5;
 
 const STATUSES = [
   ["idee", "💡", "Idée"],
@@ -199,19 +199,78 @@ function card(i) {
   </article>`;
 }
 
+// Les images sont cherchées par le navigateur (ta connexion) : Printables et Microlink
+// refusent les requêtes venant des serveurs Cloudflare (HTTP 429).
+const printablesId = (url) => url.match(/printables\.com\/(?:[a-z]{2}\/)?model\/(\d+)/)?.[1];
+const cleanTitle = (t) => t && t.split(/\s+\|\s+/)[0].replace(/\s+by\s+[^|]+$/i, "").trim();
+const fetchErr = (e) => (e.name === "TimeoutError" ? "délai dépassé" : e.message === "Failed to fetch" || e instanceof TypeError ? "bloqué par le site" : e.message);
+
+// Une seule requête groupée à l'API Printables (souvent bloquée hors printables.com : on tente).
+async function printablesMetas(list) {
+  const query = `query { ${list.map((i, n) => `p${n}: print(id: ${JSON.stringify(printablesId(i.url))}) { name image { filePath } }`).join(" ")} }`;
+  const res = await fetch("https://api.printables.com/graphql/", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ query }),
+    signal: AbortSignal.timeout(6000),
+  });
+  if (!res.ok) throw new Error("HTTP " + res.status);
+  const data = (await res.json()).data || {};
+  const out = {};
+  list.forEach((i, n) => {
+    const p = data["p" + n];
+    if (p?.image?.filePath) out[i.id] = { title: p.name, image: "https://media.printables.com/" + p.image.filePath };
+  });
+  return out;
+}
+
+async function microlink(url) {
+  const res = await fetch("https://api.microlink.io/?url=" + encodeURIComponent(url), { signal: AbortSignal.timeout(12000) });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok || body.status !== "success") throw new Error(res.ok ? body.message || body.status : "HTTP " + res.status);
+  return { title: cleanTitle(body.data?.title), image: body.data?.image?.url };
+}
+
+async function findImages(list, progress) {
+  const found = {};
+  const reasons = {};
+  const pr = list.filter((i) => printablesId(i.url));
+  if (pr.length) {
+    try { Object.assign(found, await printablesMetas(pr)); }
+    catch (e) { pr.forEach((i) => (reasons[i.id] = ["API Printables : " + fetchErr(e)])); }
+  }
+  let done = 0;
+  for (const i of list) {
+    progress?.(++done, list.length);
+    if (found[i.id]) continue;
+    try {
+      const meta = await microlink(i.url);
+      if (meta.image) found[i.id] = meta;
+      else (reasons[i.id] ||= []).push("Microlink : pas d'image");
+    } catch (e) {
+      (reasons[i.id] ||= []).push("Microlink : " + fetchErr(e));
+    }
+  }
+  const updates = Object.entries(found).map(([id, m]) => ({ id, image: m.image, title: m.title }));
+  if (updates.length) {
+    items = (await api("POST", { action: "setImages", updates })).items;
+    render();
+  }
+  const failed = list.filter((i) => !found[i.id]).map((i) => ({ title: i.title, reason: (reasons[i.id] || []).join(" · ") }));
+  if (failed.length) console.table(failed);
+  return { found: updates.length, failed };
+}
+
 async function refreshImages() {
+  const todo = items.filter((i) => i.url && !i.image);
+  if (!todo.length) return toast("Toutes les fiches ont déjà une image");
   const btn = $("images");
   btn.disabled = true;
-  toast("Recherche des images…");
   try {
-    const data = await api("POST", { action: "refresh" });
-    items = data.items;
-    render();
-    let msg = `${data.found} image(s) trouvée(s)`;
-    if (data.failed.length) msg += ` · ${data.failed.length} échec(s) — ${data.failed[0].reason}`;
-    if (data.remaining) msg += ` · encore ${data.remaining}, reclique`;
+    const r = await findImages(todo, (n, total) => toast(`Recherche des images… ${n}/${total}`));
+    let msg = `${r.found} image(s) trouvée(s)`;
+    if (r.failed.length) msg += ` · ${r.failed.length} échec(s) — ${r.failed[0].reason}`;
     toast(msg);
-    if (data.failed.length) console.table(data.failed);
   } catch (e) {
     toast("Erreur : " + e.message);
   } finally {
@@ -231,6 +290,8 @@ async function add() {
     if (data.duplicates.length) msg += `, ${data.duplicates.length} déjà présent(s)`;
     toast(msg);
     render();
+    const noImage = data.added.filter((i) => i.url && !i.image);
+    if (noImage.length) findImages(noImage).catch(() => {});
   } catch (e) {
     toast("Erreur : " + e.message);
   } finally {

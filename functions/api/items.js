@@ -37,8 +37,8 @@ export async function onRequest({ request, env }) {
         return json({ items });
       }
       case "POST": {
-        const { text = "", status = "idee", action, id } = await request.json();
-        if (action === "refresh") return json(await refreshImages(env, id));
+        const { text = "", status = "idee", action, updates } = await request.json();
+        if (action === "setImages") return json(await setImages(env, updates));
         return json(await addFromText(env, text, STATUSES.includes(status) ? status : "idee"));
       }
       case "PATCH": {
@@ -89,37 +89,23 @@ async function addFromText(env, text, status) {
   return { added, duplicates, items };
 }
 
-// Récupère image (et titre s'il n'a pas été modifié à la main) des éléments sans image,
-// ou d'un seul élément si id est fourni. Renvoie le détail des échecs pour diagnostic.
-async function refreshImages(env, id) {
-  const { items: current } = await loadDb(env);
-  const todo = current.filter((i) => i.url && (id ? i.id === id : !i.image));
-  const batch = todo.slice(0, MAX_FETCH);
-  const results = batch.map((i) => ({
-    id: i.id,
-    label: i.title || i.url,
-    entry: { url: i.url, title: i.title },
-    useTitle: i.title === titleFromUrl(i.url),
-  }));
-  await enrichAll(results);
-  const found = results.filter((r) => r.entry.image);
+// Enregistre les images trouvées par le navigateur : [{ id, image, title? }].
+// (Printables et Microlink bloquent les IP partagées de Cloudflare, pas celles des visiteurs.)
+// Le titre n'est remplacé que s'il est encore celui déduit de l'URL.
+async function setImages(env, updates) {
+  const valid = (Array.isArray(updates) ? updates : []).filter((u) => /^https?:\/\//.test(u?.image || ""));
   const items = await mutate(env, (items) => {
     let n = 0;
-    for (const r of found) {
-      const item = items.find((i) => i.id === r.id);
+    for (const u of valid) {
+      const item = items.find((i) => i.id === u.id);
       if (!item) continue;
-      item.image = r.entry.image;
-      item.title = r.entry.title || item.title;
+      item.image = u.image;
+      if (u.title && item.url && item.title === titleFromUrl(item.url)) item.title = String(u.title).trim();
       n++;
     }
-    return n ? `Images récupérées pour ${n} élément(s)` : null;
+    return n ? `Images ajoutées pour ${n} élément(s)` : null;
   });
-  return {
-    found: found.length,
-    failed: results.filter((r) => !r.entry.image).map((r) => ({ title: r.label, reason: r.reason })),
-    remaining: todo.length - batch.length,
-    items,
-  };
+  return { items };
 }
 
 async function updateItem(env, { id, status, title, note }) {
@@ -224,92 +210,24 @@ export function titleFromUrl(url) {
 const MAX_FETCH = 15;
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36";
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const printablesId = (url) => url.match(/printables\.com\/(?:[a-z]{2}\/)?model\/(\d+)/)?.[1];
 
-// jobs : [{ entry, useTitle }]. Remplit entry.image (et entry.title si useTitle),
-// ou job.reason avec la cause de l'échec.
-//  1. Printables : UNE requête groupée à leur API (des requêtes en parallèle → HTTP 429).
-//  2. Autres sites : balises og: de la page.
-//  3. Ce qui reste : service Microlink (lit la page pour nous ; gratuit, ~50/jour).
+// jobs : [{ entry, useTitle }]. Essai rapide côté serveur via les balises og: de la page,
+// sauf Printables (bloque les robots) : le navigateur complète ensuite (voir setImages).
 async function enrichAll(jobs) {
-  const errors = new Map(jobs.map((j) => [j, []]));
-  const apply = (job, meta, label) => {
-    if (job.useTitle && meta.title) job.entry.title = meta.title;
-    if (meta.image) job.entry.image = meta.image;
-    else errors.get(job).push(`${label} : pas d'image`);
-  };
-
-  const printables = jobs.filter((j) => printablesId(j.entry.url));
-  if (printables.length) {
-    try {
-      const metas = await printablesApi(printables.map((j) => printablesId(j.entry.url)));
-      printables.forEach((j, n) => (metas[n] ? apply(j, metas[n], "API Printables") : errors.get(j).push("API Printables : introuvable")));
-    } catch (e) {
-      printables.forEach((j) => errors.get(j).push(`API Printables : ${errMsg(e)}`));
-    }
-  }
-
   await Promise.all(
     jobs
-      .filter((j) => !j.entry.image && !printablesId(j.entry.url))
+      .filter((j) => !printablesId(j.entry.url))
       .map(async (j) => {
-        try { apply(j, await ogTags(j.entry.url), "page"); } catch (e) { errors.get(j).push(`page : ${errMsg(e)}`); }
+        try {
+          const meta = await ogTags(j.entry.url);
+          if (j.useTitle && meta.title) j.entry.title = meta.title;
+          if (meta.image) j.entry.image = meta.image;
+        } catch {
+          // le navigateur réessaiera
+        }
       })
   );
-
-  for (const j of jobs.filter((j) => !j.entry.image)) {
-    try { apply(j, await microlink(j.entry.url), "Microlink"); } catch (e) { errors.get(j).push(`Microlink : ${errMsg(e)}`); }
-  }
-
-  for (const j of jobs) if (!j.entry.image) j.reason = errors.get(j).join(" · ");
-}
-
-const errMsg = (e) => (e.name === "TimeoutError" ? "délai dépassé" : e.message);
-
-// Une seule requête GraphQL pour tous les modèles (alias p0, p1, …).
-// En cas de 429, attend le délai demandé (max 5 s) et réessaie une fois.
-async function printablesApi(ids) {
-  const query = `query { ${ids.map((id, n) => `p${n}: print(id: ${JSON.stringify(id)}) { name image { filePath } }`).join(" ")} }`;
-  for (let attempt = 0; ; attempt++) {
-    const res = await fetch("https://api.printables.com/graphql/", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        accept: "application/json",
-        "user-agent": UA,
-        origin: "https://www.printables.com",
-        referer: "https://www.printables.com/",
-      },
-      body: JSON.stringify({ query }),
-      signal: AbortSignal.timeout(8000),
-    });
-    if (res.status === 429 && attempt === 0) {
-      await sleep(Math.min(5, Number(res.headers.get("retry-after")) || 2) * 1000);
-      continue;
-    }
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const body = await res.json();
-    if (!body.data) throw new Error(body.errors?.[0]?.message || "réponse vide");
-    return ids.map((_, n) => {
-      const print = body.data[`p${n}`];
-      return print && {
-        title: print.name,
-        image: print.image?.filePath ? `https://media.printables.com/${print.image.filePath}` : undefined,
-      };
-    });
-  }
-}
-
-async function microlink(url) {
-  const res = await fetch(`https://api.microlink.io/?url=${encodeURIComponent(url)}`, {
-    headers: { accept: "application/json" },
-    signal: AbortSignal.timeout(10000),
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const body = await res.json();
-  if (body.status !== "success") throw new Error(body.message || body.status);
-  return { title: cleanTitle(body.data?.title), image: body.data?.image?.url };
 }
 
 function cleanTitle(title) {
@@ -319,7 +237,7 @@ function cleanTitle(title) {
 async function ogTags(url) {
   const res = await fetch(url, {
     headers: { "user-agent": UA, accept: "text/html,application/xhtml+xml", "accept-language": "fr,en;q=0.8" },
-    signal: AbortSignal.timeout(6000),
+    signal: AbortSignal.timeout(4000),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const html = (await res.text()).slice(0, 400000);
